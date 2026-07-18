@@ -65,25 +65,26 @@ create table if not exists packages (
   credits int,              -- null = unlimited
   expiry_days int not null default 30,
   terms int not null default 1,
+  sort_order int,           -- controls display order (lower shows first); not tied to price
   created_at timestamptz default now()
 );
 alter table packages enable row level security;
 create policy "packages_all_authenticated" on packages for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
-insert into packages (id, name, description, amount, credits, expiry_days, terms) values
-  ('trial',   'Trial',                  'Trial session, no charges',                          0,     1,    7,   1),
-  ('free',    'Free Session',           'Free session, no charges',                           0,     1,    7,   1),
-  ('flex5',   'Flexible 5 Sessions',    '5 session credits, expires after 30 days',            7000,  5,    30,  1),
-  ('flex10',  'Flexible 10 Sessions',   '10 session credits, expires after 60 days',           12500, 10,   60,  1),
-  ('flex30',  'Flexible 30 Sessions',   '30 session credits, expires after 90 days',           34000, 30,   90,  1),
-  ('unl1',    'Unlimited 1 Month',      'Unlimited session credits, expires after 30 days',    12500, null, 30,  1),
-  ('unl2',    'Unlimited 2 Months',     'Unlimited session credits, expires after 60 days',    19000, null, 60,  1),
-  ('unl3',    'Unlimited 3 Months',     'Unlimited session credits, expires after 90 days',    24000, null, 90,  1),
-  ('perfQ',   'Performance Quarterly',  '1 year package, 4 payment terms, unlimited sessions', 22800, null, 365, 4),
-  ('perfS',   'Performance Semi Annual','1 year package, 2 payment terms, unlimited sessions', 43200, null, 365, 2),
-  ('perfA',   'Performance Annual',     '1 year package, 1-time payment, unlimited sessions',  81600, null, 365, 1),
-  ('scholar', 'Scholar',                'Unlimited session credits, no charges',               0,     null, 365, 1)
+insert into packages (id, name, description, amount, credits, expiry_days, terms, sort_order) values
+  ('trial',   'Trial',                  'Trial session, no charges',                          0,     1,    7,   1, 1),
+  ('free',    'Free Session',           'Free session, no charges',                           0,     1,    7,   1, 2),
+  ('scholar', 'Scholar',                'Unlimited session credits, no charges',               0,     null, 365, 1, 3),
+  ('flex5',   'Flexible 5 Sessions',    '5 session credits, expires after 30 days',            7000,  5,    30,  1, 4),
+  ('flex10',  'Flexible 10 Sessions',   '10 session credits, expires after 60 days',           12500, 10,   60,  1, 5),
+  ('flex30',  'Flexible 30 Sessions',   '30 session credits, expires after 90 days',           34000, 30,   90,  1, 6),
+  ('unl1',    'Unlimited 1 Month',      'Unlimited session credits, expires after 30 days',    12500, null, 30,  1, 7),
+  ('unl2',    'Unlimited 2 Months',     'Unlimited session credits, expires after 60 days',    19000, null, 60,  1, 8),
+  ('unl3',    'Unlimited 3 Months',     'Unlimited session credits, expires after 90 days',    24000, null, 90,  1, 9),
+  ('perfQ',   'Performance Quarterly',  '1 year package, 4 payment terms, unlimited sessions', 22800, null, 365, 4, 10),
+  ('perfS',   'Performance Semi Annual','1 year package, 2 payment terms, unlimited sessions', 43200, null, 365, 2, 11),
+  ('perfA',   'Performance Annual',     '1 year package, 1-time payment, unlimited sessions',  81600, null, 365, 1, 12)
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------

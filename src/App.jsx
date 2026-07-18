@@ -251,7 +251,6 @@ function ClubApp({ user }) {
         supabase.from("profiles").select("*"),
         supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
       ]);
-        console.log("RAW PACKAGES:", JSON.stringify(pk.data, null, 2));
       for (const r of [pa, pl, pk, en, me, pr]) if (r.error) throw r.error;
       setParents(pa.data); setPlayers(pl.data); setPackages(pk.data); setEnrollments(en.data); setMerch(me.data); setProfiles(pr.data);
       setMyProfile(myPr.data || null);
@@ -285,7 +284,7 @@ function ClubApp({ user }) {
 
   /* ---- packages ---- */
   const upsertPackage = async (pkg) => {
-    const row = { id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiry_days: pkg.expiryDays, terms: pkg.terms };
+    const row = { id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiry_days: pkg.expiryDays, terms: pkg.terms, sort_order: pkg.sortOrder };
     const exists = packages.some((p) => p.id === pkg.id);
     if (exists) await supabase.from("packages").update(row).eq("id", pkg.id);
     else await supabase.from("packages").insert({ ...row, id: row.id || uid() });
@@ -443,7 +442,7 @@ function ClubApp({ user }) {
         )}
         {tab === "parents" && <ParentsTab parents={parents} players={players} onAdd={() => setParentModal({})} onEdit={(p) => setParentModal(p)} onDelete={deleteParent} />}
         {tab === "attendance" && <AttendanceTab players={players} enrollments={enrollments} packages={packages} user={user} onDataChanged={fetchCore} />}
-        {tab === "packages" && <PackagesTab packages={packages} enrollments={enrollments} onAdd={() => setPackageModal({})} onEdit={(p) => setPackageModal(p)} onDelete={deletePackage} />}
+        {tab === "packages" && <PackagesTab packages={packages} enrollments={enrollments} onAdd={() => setPackageModal({ sortOrder: Math.max(0, ...packages.map((p) => p.sort_order || 0)) + 1 })} onEdit={(p) => setPackageModal(p)} onDelete={deletePackage} />}
         {tab === "merch" && <MerchTab merch={merch} onAdd={() => setMerchModal({ bulk: true })} onEdit={(m) => setMerchModal(m)} onDelete={deleteMerch} />}
         {tab === "inventory" && <InventoryTab merch={merch} onAddStock={(m) => setStockModal(m)} />}
         {tab === "sales" && <SalesTab players={players} merch={merch} user={user} onSaleRecorded={fetchCore} />}
@@ -1002,6 +1001,7 @@ function DayModal({ date, players, enrollments, packages, user, onClose, onChang
 
 /* --------------------------------- Packages --------------------------------- */
 function PackagesTab({ packages, enrollments, onAdd, onEdit, onDelete }) {
+  const sorted = [...packages].sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -1009,7 +1009,7 @@ function PackagesTab({ packages, enrollments, onAdd, onEdit, onDelete }) {
         <button className="bam-btn bam-btn-primary" onClick={onAdd}><Plus size={15} /> Add Package</button>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {packages.map((pkg) => {
+        {sorted.map((pkg) => {
           const active = enrollments.filter((e) => e.package_id === pkg.id && enrollmentStatus(e, todayStr()) === "active").length;
           return (
             <div key={pkg.id} className="bam-card" style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
@@ -1023,7 +1023,7 @@ function PackagesTab({ packages, enrollments, onAdd, onEdit, onDelete }) {
               <div className="bam-display" style={{ fontSize: 17, minWidth: 100, textAlign: "right" }}>{fmtMoney(pkg.amount)}</div>
               <div className="bam-badge" style={{ background: "#E9EFF9", color: "var(--blue)", flexShrink: 0 }}>{active} active</div>
               <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => onEdit({ id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiryDays: pkg.expiry_days, terms: pkg.terms })}><Pencil size={13} /></button>
+                <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => onEdit({ id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiryDays: pkg.expiry_days, terms: pkg.terms, sortOrder: pkg.sort_order })}><Pencil size={13} /></button>
                 <button className="bam-btn bam-btn-danger" style={{ padding: 6 }} onClick={() => { if (confirm(`Remove ${pkg.name}?`)) onDelete(pkg.id); }}><Trash2 size={13} /></button>
               </div>
             </div>
@@ -1042,10 +1042,11 @@ function PackageModal({ pkg, onClose, onSave }) {
   const [credits, setCredits] = useState(pkg.credits ?? 10);
   const [expiryDays, setExpiryDays] = useState(pkg.expiryDays ?? 30);
   const [terms, setTerms] = useState(pkg.terms ?? 1);
+  const [sortOrder, setSortOrder] = useState(pkg.sortOrder ?? 99);
   const submit = () => {
     if (!name.trim()) { alert("Package name is required."); return; }
     if (!expiryDays || expiryDays <= 0) { alert("Expiry days must be greater than 0."); return; }
-    onSave({ id: pkg.id || uid(), name: name.trim(), description: description.trim(), amount: Number(amount) || 0, credits: unlimited ? null : (Number(credits) || 0), expiryDays: Number(expiryDays), terms: Number(terms) || 1 });
+    onSave({ id: pkg.id || uid(), name: name.trim(), description: description.trim(), amount: Number(amount) || 0, credits: unlimited ? null : (Number(credits) || 0), expiryDays: Number(expiryDays), terms: Number(terms) || 1, sortOrder: Number(sortOrder) || 0 });
   };
   return (
     <Modal title={pkg.id ? "Edit Package" : "Add Package"} onClose={onClose}>
@@ -1064,6 +1065,9 @@ function PackageModal({ pkg, onClose, onSave }) {
         <div style={{ flex: 1 }}><label className="bam-label">Expiry (days)</label><input type="number" className="bam-input" style={{ marginBottom: 16 }} value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} /></div>
         <div style={{ flex: 1 }}><label className="bam-label">Payment Terms</label><input type="number" min="1" className="bam-input" style={{ marginBottom: 16 }} value={terms} onChange={(e) => setTerms(e.target.value)} /></div>
       </div>
+      <label className="bam-label">Position in list</label>
+      <input type="number" className="bam-input" style={{ marginBottom: 6 }} value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} />
+      <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 0, marginBottom: 16 }}>Lower numbers show first. Packages are shown in this order rather than by price.</p>
       <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit}>Save Package</button>
     </Modal>
   );
