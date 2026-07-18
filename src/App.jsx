@@ -245,12 +245,13 @@ function ClubApp({ user }) {
       const [pa, pl, pk, en, me, pr, myPr] = await Promise.all([
         supabase.from("parents").select("*").order("name"),
         supabase.from("players").select("*").order("name"),
-        supabase.from("packages").select("*").order("amount"),
+        supabase.from("packages").select("*").order("sort_order"),
         supabase.from("enrollments").select("*"),
         supabase.from("merchandise").select("*").order("item"),
         supabase.from("profiles").select("*"),
         supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
       ]);
+        console.log("RAW PACKAGES:", JSON.stringify(pk.data, null, 2));
       for (const r of [pa, pl, pk, en, me, pr]) if (r.error) throw r.error;
       setParents(pa.data); setPlayers(pl.data); setPackages(pk.data); setEnrollments(en.data); setMerch(me.data); setProfiles(pr.data);
       setMyProfile(myPr.data || null);
@@ -1008,7 +1009,7 @@ function PackagesTab({ packages, enrollments, onAdd, onEdit, onDelete }) {
         <button className="bam-btn bam-btn-primary" onClick={onAdd}><Plus size={15} /> Add Package</button>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {packages.map((pkg) => {
+              {packages.map((pkg) => {
           const active = enrollments.filter((e) => e.package_id === pkg.id && enrollmentStatus(e, todayStr()) === "active").length;
           return (
             <div key={pkg.id} className="bam-card" style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
