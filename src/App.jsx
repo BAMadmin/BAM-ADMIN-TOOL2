@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   LayoutDashboard, Users, UserCircle2, CalendarDays, PackageSearch,
   Plus, X, Search, Pencil, Trash2, ChevronLeft, ChevronRight,
@@ -111,10 +111,12 @@ const Style = () => (
   `}</style>
 );
 
-function Modal({ title, onClose, children, wide }) {
+function Modal({ title, onClose, children, wide, size }) {
+  const width = size === "xl" ? "92vw" : wide ? 680 : 460;
+  const maxWidth = size === "xl" ? 1600 : undefined;
   return (
     <div className="bam-modal-overlay" onClick={onClose}>
-      <div className="bam-card bam-scroll" style={{ width: wide ? 680 : 460, maxHeight: "88vh", overflowY: "auto", padding: 20 }} onClick={(e) => e.stopPropagation()}>
+      <div className="bam-card bam-scroll" style={{ width, maxWidth, maxHeight: "88vh", overflowY: "auto", padding: 20 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <h3 className="bam-display" style={{ fontSize: 17, margin: 0 }}>{title}</h3>
           <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={onClose}><X size={16} /></button>
@@ -966,6 +968,8 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
   const [records, setRecords] = useState([]);
   const [loadingDay, setLoadingDay] = useState(true);
   const [busyKey, setBusyKey] = useState(null); // prevents double-click while a write is in flight
+  const [search, setSearch] = useState("");
+  const rowRefs = useRef({});
   const activeCamps = campsActiveOn(packages, date);
 
   const loadDay = async () => {
@@ -1044,10 +1048,25 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
     ...activeCamps.map((camp, i) => ({ key: `camp:${camp.id}`, label: camp.name, group: "Camps", color: campColor(i).fg })),
   ];
 
+  const isMatch = (p) => search.trim() && (p.name.toLowerCase().includes(search.trim().toLowerCase()) || (p.nickname || "").toLowerCase().includes(search.trim().toLowerCase()));
+  useEffect(() => {
+    if (!search.trim()) return;
+    const firstMatch = players.find(isMatch);
+    if (firstMatch && rowRefs.current[firstMatch.id]) {
+      rowRefs.current[firstMatch.id].scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [search]);
+
   return (
-    <Modal title={`Attendance · ${fmtDate(date)}`} onClose={onClose} wide>
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
-        {columns.map((col) => countBlock(col.label, countFor(col.key), col.color))}
+    <Modal title={`Attendance · ${fmtDate(date)}`} onClose={onClose} size="xl">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", minWidth: 220 }}>
+          <Search size={14} style={{ position: "absolute", left: 9, top: 10, color: "#9494AA" }} />
+          <input className="bam-input" style={{ paddingLeft: 28 }} placeholder="Search player…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          {columns.map((col) => countBlock(col.label, countFor(col.key), col.color))}
+        </div>
       </div>
       <div style={{ overflowX: "auto" }} className="bam-scroll">
         <div style={{ minWidth: 260 + columns.length * 150 }}>
@@ -1056,11 +1075,12 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
             {columns.map((col) => <div key={col.key} style={{ width: 150, textAlign: "center" }}>{col.label}</div>)}
           </div>
           {loadingDay ? <p style={{ color: "#9494AA" }}>Loading…</p> : (
-            <div style={{ maxHeight: 400, overflowY: "auto" }} className="bam-scroll">
+            <div style={{ maxHeight: "62vh", overflowY: "auto" }} className="bam-scroll">
               {players.map((p) => {
                 const enr = nonCampActiveEnrollmentFor(enrollments, packages, p.id, date);
+                const matched = isMatch(p);
                 return (
-                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: "1px solid var(--line)" }}>
+                  <div key={p.id} ref={(el) => { rowRefs.current[p.id] = el; }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: "1px solid var(--line)", background: matched ? "#FFF6DC" : "transparent", borderRadius: matched ? 6 : 0, transition: "background .2s ease" }}>
                     <div style={{ flex: 1, minWidth: 200 }}>
                       <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}{p.nickname ? <span style={{ color: "var(--muted)", fontWeight: 400 }}> "{p.nickname}"</span> : ""}</div>
                       <div style={{ fontSize: 12, color: enr ? "var(--muted)" : "var(--red)" }}>{enr ? `${enr.package_name} · ${enr.credits !== null ? enr.credits_remaining + " credits left" : "unlimited"}` : "No active package"}</div>
