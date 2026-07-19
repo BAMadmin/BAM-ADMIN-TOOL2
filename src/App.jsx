@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Users, UserCircle2, CalendarDays, PackageSearch,
   Plus, X, Search, Pencil, Trash2, ChevronLeft, ChevronRight,
   CheckCircle2, Circle, AlertTriangle, CreditCard, Clock, ShieldCheck,
-  ShoppingBag, Boxes, Receipt, Minus, Download, PackagePlus, LogOut, Wallet, Percent, Goal
+  ShoppingBag, Boxes, Receipt, Minus, Download, PackagePlus, LogOut, Wallet, Percent, Goal, MapPin
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -32,7 +32,26 @@ function activeEnrollmentFor(enrollments, playerId, date) {
     .filter((e) => enrollmentStatus(e, date) === "active" && e.start_date <= date)
     .sort((a, b) => a.start_date.localeCompare(b.start_date))[0] || null;
 }
+const campsActiveOn = (packages, date) => packages.filter((p) => p.category === "camp" && p.camp_start_date && p.camp_end_date && p.camp_start_date <= date && date <= p.camp_end_date);
+const campEnrollmentFor = (enrollments, playerId, campPackageId) => enrollments.find((e) => e.player_id === playerId && e.package_id === campPackageId) || null;
+function nonCampActiveEnrollmentFor(enrollments, packages, playerId, date) {
+  const filtered = enrollments.filter((e) => { const p = packages.find((pk) => pk.id === e.package_id); return !p || p.category !== "camp"; });
+  return activeEnrollmentFor(filtered, playerId, date);
+}
 const sessionTypeColor = (type) => (type === "match" ? { fg: "var(--maroon)", bg: "#FBEAE9" } : { fg: "var(--blue)", bg: "#E9EFF9" });
+const LOCATION_COLORS = [
+  { fg: "#154284", bg: "#E9EFF9" }, // Arca — main blue
+  { fg: "#1C7293", bg: "#E4F2F5" }, // Ateneo — teal-blue
+  { fg: "#5A7FBF", bg: "#EDF1FA" }, // Polo Club — soft periwinkle
+  { fg: "#2D6CB5", bg: "#E7F0FA" }, // any location beyond the first three
+];
+const locationColor = (index) => LOCATION_COLORS[index % LOCATION_COLORS.length];
+const CAMP_COLORS = [
+  { fg: "#7A3B8A", bg: "#F3E9F6" },
+  { fg: "#B5651D", bg: "#FBEEE1" },
+  { fg: "#3B7A5A", bg: "#E7F5EE" },
+];
+const campColor = (index) => CAMP_COLORS[index % CAMP_COLORS.length];
 const FULL_KIT_PRICE = 4500;
 const STANDARD_SIZES = ["XS Kids", "S Kids", "M Kids", "L Kids", "XL Kids", "S Adult", "M Adult", "L Adult", "XL Adult"];
 const SOCK_SIZES = ["S", "M", "L", "XL"];
@@ -225,6 +244,7 @@ function ClubApp({ user }) {
   const [enrollments, setEnrollments] = useState([]);
   const [merch, setMerch] = useState([]);
   const [profiles, setProfiles] = useState([]);
+  const [locations, setLocations] = useState([]);
   const [myProfile, setMyProfile] = useState(null);
 
   const [playerModal, setPlayerModal] = useState(null);
@@ -234,6 +254,7 @@ function ClubApp({ user }) {
   const [merchModal, setMerchModal] = useState(null);
   const [stockModal, setStockModal] = useState(null);
   const [packageModal, setPackageModal] = useState(null);
+  const [locationModal, setLocationModal] = useState(null);
   const [search, setSearch] = useState("");
 
   const profileName = (id) => profiles.find((p) => p.id === id)?.username || "—";
@@ -242,7 +263,7 @@ function ClubApp({ user }) {
 
   const fetchCore = async () => {
     try {
-      const [pa, pl, pk, en, me, pr, myPr] = await Promise.all([
+      const [pa, pl, pk, en, me, pr, myPr, loc] = await Promise.all([
         supabase.from("parents").select("*").order("name"),
         supabase.from("players").select("*").order("name"),
         supabase.from("packages").select("*").order("sort_order"),
@@ -250,9 +271,11 @@ function ClubApp({ user }) {
         supabase.from("merchandise").select("*").order("item"),
         supabase.from("profiles").select("*"),
         supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+        supabase.from("locations").select("*").order("sort_order"),
       ]);
-      for (const r of [pa, pl, pk, en, me, pr]) if (r.error) throw r.error;
+      for (const r of [pa, pl, pk, en, me, pr, loc]) if (r.error) throw r.error;
       setParents(pa.data); setPlayers(pl.data); setPackages(pk.data); setEnrollments(en.data); setMerch(me.data); setProfiles(pr.data);
+      setLocations(loc.data);
       setMyProfile(myPr.data || null);
       setError(null);
     } catch (e) {
@@ -284,7 +307,13 @@ function ClubApp({ user }) {
 
   /* ---- packages ---- */
   const upsertPackage = async (pkg) => {
-    const row = { id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiry_days: pkg.expiryDays, terms: pkg.terms, sort_order: pkg.sortOrder };
+    const isCamp = pkg.category === "camp";
+    const row = {
+      id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount,
+      credits: isCamp ? null : pkg.credits, expiry_days: pkg.expiryDays, terms: isCamp ? 1 : pkg.terms,
+      sort_order: pkg.sortOrder, category: pkg.category || "standard",
+      camp_start_date: isCamp ? pkg.campStartDate : null, camp_end_date: isCamp ? pkg.campEndDate : null,
+    };
     const exists = packages.some((p) => p.id === pkg.id);
     if (exists) await supabase.from("packages").update(row).eq("id", pkg.id);
     else await supabase.from("packages").insert({ ...row, id: row.id || uid() });
@@ -296,16 +325,41 @@ function ClubApp({ user }) {
     await fetchCore();
   };
 
+  /* ---- locations ---- */
+  const upsertLocation = async (loc) => {
+    const row = { name: loc.name, enabled: loc.enabled, sort_order: loc.sortOrder };
+    if (loc.id) await supabase.from("locations").update(row).eq("id", loc.id);
+    else await supabase.from("locations").insert(row);
+    await fetchCore();
+  };
+  const deleteLocation = async (id) => {
+    const { data } = await supabase.from("attendance").select("id").eq("location_id", id).limit(1);
+    if (data && data.length) { alert("This location has attendance records and can't be deleted. You can disable it instead so it stops appearing in new attendance."); return; }
+    await supabase.from("locations").delete().eq("id", id);
+    await fetchCore();
+  };
+
   /* ---- enrollments / payments ---- */
-  const enrollPlayer = async (playerId, packageId, startDate) => {
+  const enrollPlayer = async (playerId, packageId, startDate, kit) => {
     const pkg = packages.find((p) => p.id === packageId);
     if (!pkg) return;
+    const isCamp = pkg.category === "camp";
+    const finalStart = isCamp ? pkg.camp_start_date : startDate;
+    const finalExpiry = isCamp ? pkg.camp_end_date : addDays(startDate, pkg.expiry_days);
     const { data: enrData, error: enrErr } = await supabase.from("enrollments").insert({
-      player_id: playerId, package_id: pkg.id, package_name: pkg.name, start_date: startDate,
-      expiry_date: addDays(startDate, pkg.expiry_days), credits: pkg.credits, credits_remaining: pkg.credits,
-      terms: pkg.terms, terms_paid: 1, amount: pkg.amount, created_by: user.id,
+      player_id: playerId, package_id: pkg.id, package_name: pkg.name, start_date: finalStart,
+      expiry_date: finalExpiry, credits: pkg.credits, credits_remaining: pkg.credits,
+      terms: pkg.terms, terms_paid: 1, amount: pkg.amount,
+      kit_jersey_sku_id: kit?.jerseySkuId || null, kit_shorts_sku_id: kit?.shortsSkuId || null,
+      created_by: user.id,
     }).select().single();
     if (enrErr) { alert(enrErr.message); return; }
+    if (isCamp && kit?.jerseySkuId && kit?.shortsSkuId) {
+      const j = merch.find((m) => m.id === kit.jerseySkuId);
+      const s = merch.find((m) => m.id === kit.shortsSkuId);
+      if (j) await supabase.from("merchandise").update({ stock: j.stock - 1 }).eq("id", j.id);
+      if (s) await supabase.from("merchandise").update({ stock: s.stock - 1 }).eq("id", s.id);
+    }
     const termAmount = pkg.terms > 1 ? pkg.amount / pkg.terms : pkg.amount;
     await supabase.from("payment_log").insert({
       player_id: playerId, enrollment_id: enrData.id, package_name: pkg.name, amount: termAmount,
@@ -399,10 +453,11 @@ function ClubApp({ user }) {
     { id: "parents", label: "Parents", icon: UserCircle2 },
     { id: "attendance", label: "Attendance", icon: CalendarDays },
     { id: "packages", label: "Packages", icon: PackageSearch },
+    { id: "locations", label: "Locations", icon: MapPin },
     { id: "merch", label: "Merchandise", icon: ShoppingBag },
     { id: "inventory", label: "Inventory", icon: Boxes },
     { id: "sales", label: "Daily Sales", icon: Receipt },
-    { id: "revenue", label: "Revenue", icon: Wallet },
+    { id: "revenue", label: "Enrollment", icon: Wallet },
   ];
 
   return (
@@ -441,8 +496,9 @@ function ClubApp({ user }) {
             onEnroll={(id) => setEnrollModal(id)} onPayTerm={payNextTerm} profileName={profileName} />
         )}
         {tab === "parents" && <ParentsTab parents={parents} players={players} onAdd={() => setParentModal({})} onEdit={(p) => setParentModal(p)} onDelete={deleteParent} />}
-        {tab === "attendance" && <AttendanceTab players={players} enrollments={enrollments} packages={packages} user={user} onDataChanged={fetchCore} />}
+        {tab === "attendance" && <AttendanceTab players={players} enrollments={enrollments} packages={packages} locations={locations} user={user} onDataChanged={fetchCore} />}
         {tab === "packages" && <PackagesTab packages={packages} enrollments={enrollments} onAdd={() => setPackageModal({ sortOrder: Math.max(0, ...packages.map((p) => p.sort_order || 0)) + 1 })} onEdit={(p) => setPackageModal(p)} onDelete={deletePackage} />}
+        {tab === "locations" && <LocationsTab locations={locations} onAdd={() => setLocationModal({ sortOrder: Math.max(0, ...locations.map((l) => l.sort_order || 0)) + 1 })} onEdit={(l) => setLocationModal(l)} onDelete={deleteLocation} />}
         {tab === "merch" && <MerchTab merch={merch} onAdd={() => setMerchModal({ bulk: true })} onEdit={(m) => setMerchModal(m)} onDelete={deleteMerch} />}
         {tab === "inventory" && <InventoryTab merch={merch} onAddStock={(m) => setStockModal(m)} />}
         {tab === "sales" && <SalesTab players={players} merch={merch} user={user} onSaleRecorded={fetchCore} />}
@@ -451,8 +507,9 @@ function ClubApp({ user }) {
 
       {playerModal && <PlayerModal player={playerModal} parents={parents} onClose={() => setPlayerModal(null)} onSave={async (p) => { await upsertPlayer(p); setPlayerModal(null); }} onNewParent={() => setParentModal({})} />}
       {parentModal && <ParentModal parent={parentModal} onClose={() => setParentModal(null)} onSave={async (p) => { await upsertParent(p); setParentModal(null); }} />}
-      {enrollModal && <EnrollModal player={playerById(enrollModal)} packages={packages} onClose={() => setEnrollModal(null)} onSave={async (pkgId, start) => { await enrollPlayer(enrollModal, pkgId, start); setEnrollModal(null); }} />}
+      {enrollModal && <EnrollModal player={playerById(enrollModal)} packages={packages} merch={merch} onClose={() => setEnrollModal(null)} onSave={async (pkgId, start, kit) => { await enrollPlayer(enrollModal, pkgId, start, kit); setEnrollModal(null); }} />}
       {packageModal && <PackageModal pkg={packageModal} onClose={() => setPackageModal(null)} onSave={async (p) => { await upsertPackage(p); setPackageModal(null); }} />}
+      {locationModal && <LocationModal loc={locationModal} onClose={() => setLocationModal(null)} onSave={async (l) => { await upsertLocation(l); setLocationModal(null); }} />}
       {merchModal && (
         merchModal.bulk
           ? <AddProductModal onClose={() => setMerchModal(null)} onSave={async (item, price, sizes, stock) => { await addProductBulk(item, price, sizes, stock); setMerchModal(null); }} />
@@ -643,7 +700,7 @@ function PlayersTab({ players, enrollments, packages, parentById, search, setSea
                       </div>
                     </td>
                   </tr>
-                  {isOpen && <tr><td colSpan={8} style={{ background: "#F9F9FC" }}><PlayerDetail player={p} enrollments={enrollments.filter((e) => e.player_id === p.id)} onPayTerm={onPayTerm} profileName={profileName} /></td></tr>}
+                  {isOpen && <tr><td colSpan={8} style={{ background: "#F9F9FC" }}><PlayerDetail player={p} enrollments={enrollments.filter((e) => e.player_id === p.id)} packages={packages} onPayTerm={onPayTerm} profileName={profileName} /></td></tr>}
                 </React.Fragment>
               );
             })}
@@ -656,7 +713,7 @@ function PlayersTab({ players, enrollments, packages, parentById, search, setSea
   );
 }
 
-function PlayerDetail({ player, enrollments, onPayTerm, profileName }) {
+function PlayerDetail({ player, enrollments, packages, onPayTerm, profileName }) {
   const [recentAttendance, setRecentAttendance] = useState([]);
   const [loadingAtt, setLoadingAtt] = useState(true);
   const hist = [...enrollments].sort((a, b) => b.start_date.localeCompare(a.start_date));
@@ -697,12 +754,14 @@ function PlayerDetail({ player, enrollments, onPayTerm, profileName }) {
         {loadingAtt && <div style={{ fontSize: 13, color: "#9494AA" }}>Loading…</div>}
         {!loadingAtt && recentAttendance.length === 0 && <div style={{ fontSize: 13, color: "#9494AA" }}>No attendance logged.</div>}
         {recentAttendance.map((a) => {
-          const c = sessionTypeColor(a.session_type);
+          const isCamp = a.session_type === "camp";
+          const campPkg = isCamp ? packages.find((p) => p.id === a.camp_package_id) : null;
+          const c = isCamp ? campColor(0) : sessionTypeColor(a.session_type);
           return (
             <div key={a.id} style={{ fontSize: 13, padding: "5px 0", borderBottom: "1px solid var(--line)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span>{fmtDate(a.date)}</span>
-                <span className="bam-badge" style={{ background: c.bg, color: c.fg, textTransform: "capitalize" }}>{a.session_type}</span>
+                <span className="bam-badge" style={{ background: c.bg, color: c.fg }}>{isCamp ? (campPkg ? campPkg.name : "Camp") : a.session_type.charAt(0).toUpperCase() + a.session_type.slice(1)}</span>
               </div>
               {a.no_credit && <div style={{ color: "var(--blue)", fontSize: 11 }}>Attendance only — no credit deducted</div>}
               {!a.no_credit && !a.enrollment_id && <div style={{ color: "var(--red)", fontSize: 11 }}>No active package — nothing deducted</div>}
@@ -822,7 +881,7 @@ function ParentsTab({ parents, players, onAdd, onEdit, onDelete }) {
 }
 
 /* -------------------------------- Attendance (month-scoped) -------------------------------- */
-function AttendanceTab({ players, enrollments, packages, user, onDataChanged }) {
+function AttendanceTab({ players, enrollments, packages, locations, user, onDataChanged }) {
   const [cursor, setCursor] = useState(() => { const d = new Date(); d.setDate(1); return d; });
   const [monthAttendance, setMonthAttendance] = useState([]);
   const [dayModalDate, setDayModalDate] = useState(null);
@@ -834,25 +893,40 @@ function AttendanceTab({ players, enrollments, packages, user, onDataChanged }) 
   const today = todayStr();
   const monthStart = `${year}-${String(month + 1).padStart(2, "0")}-01`;
   const monthEnd = `${year}-${String(month + 1).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
+  const enabledLocations = locations.filter((l) => l.enabled).sort((a, b) => (a.sort_order ?? 99) - (b.sort_order ?? 99));
 
   const loadMonth = async () => {
-    const { data } = await supabase.from("attendance").select("date, session_type").gte("date", monthStart).lte("date", monthEnd);
+    const { data } = await supabase.from("attendance").select("date, session_type, location_id, camp_package_id").gte("date", monthStart).lte("date", monthEnd);
     setMonthAttendance(data || []);
   };
   useEffect(() => { loadMonth(); }, [year, month]);
 
-  const countsFor = (day) => {
+  const linesFor = (day) => {
     const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
     const dayRecords = monthAttendance.filter((a) => a.date === ds);
-    return { training: dayRecords.filter((a) => a.session_type === "training").length, match: dayRecords.filter((a) => a.session_type === "match").length };
+    const lines = [];
+    enabledLocations.forEach((loc, i) => {
+      const c = locationColor(i);
+      const n = dayRecords.filter((a) => a.session_type === "training" && a.location_id === loc.id).length;
+      if (n > 0) lines.push({ label: `TS ${loc.name}`, count: n, color: c.fg });
+    });
+    const matchCount = dayRecords.filter((a) => a.session_type === "match").length;
+    if (matchCount > 0) lines.push({ label: "Match", count: matchCount, color: "var(--maroon)" });
+    campsActiveOn(packages, ds).forEach((camp, i) => {
+      const n = dayRecords.filter((a) => a.session_type === "camp" && a.camp_package_id === camp.id).length;
+      if (n > 0) lines.push({ label: camp.name, count: n, color: campColor(i).fg });
+    });
+    return lines;
   };
 
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
         <h2 className="bam-display" style={{ fontSize: 21, margin: 0 }}>Attendance Calendar</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--muted)" }}><span style={{ width: 9, height: 9, borderRadius: 3, background: "var(--blue)", display: "inline-block" }} /> Training</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          {enabledLocations.map((loc, i) => (
+            <span key={loc.id} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--muted)" }}><span style={{ width: 9, height: 9, borderRadius: 3, background: locationColor(i).fg, display: "inline-block" }} /> {loc.name}</span>
+          ))}
           <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--muted)" }}><span style={{ width: 9, height: 9, borderRadius: 3, background: "var(--maroon)", display: "inline-block" }} /> Match</span>
           <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => setCursor(new Date(year, month - 1, 1))}><ChevronLeft size={15} /></button>
           <span style={{ fontWeight: 700, minWidth: 150, textAlign: "center" }}>{monthLabelStr}</span>
@@ -866,21 +940,20 @@ function AttendanceTab({ players, enrollments, packages, user, onDataChanged }) 
         {cells.map((day, i) => {
           if (!day) return <div key={i} />;
           const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-          const { training, match } = countsFor(day);
+          const lines = linesFor(day);
           return (
             <div key={i} className={"bam-day" + (ds === today ? " today" : "")} onClick={() => setDayModalDate(ds)}>
               <div style={{ fontWeight: 700, fontSize: 13 }}>{day}</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 6 }}>
-                {training > 0 && <div style={{ fontSize: 9, fontWeight: 700, color: "var(--blue)", textTransform: "uppercase" }}>Training · {training}</div>}
-                {match > 0 && <div style={{ fontSize: 9, fontWeight: 700, color: "var(--maroon)", textTransform: "uppercase" }}>Match · {match}</div>}
+                {lines.map((l) => <div key={l.label} style={{ fontSize: 9, fontWeight: 700, color: l.color, textTransform: "uppercase" }}>{l.label} · {l.count}</div>)}
               </div>
             </div>
           );
         })}
       </div>
-      <p style={{ fontSize: 12, color: "#9494AA", marginTop: 14 }}>Click any day to mark players present for a training or match day. Blue = training, maroon = match.</p>
+      <p style={{ fontSize: 12, color: "#9494AA", marginTop: 14 }}>Click any day to mark players present. Each location, match day, and active camp gets its own line — only shown on days something actually happened.</p>
       {dayModalDate && (
-        <DayModal date={dayModalDate} players={players} enrollments={enrollments} packages={packages} user={user}
+        <DayModal date={dayModalDate} players={players} enrollments={enrollments} packages={packages} locations={enabledLocations} user={user}
           onClose={() => setDayModalDate(null)}
           onChanged={async () => { await loadMonth(); await onDataChanged(); }} />
       )}
@@ -888,11 +961,12 @@ function AttendanceTab({ players, enrollments, packages, user, onDataChanged }) 
   );
 }
 
-function DayModal({ date, players, enrollments, packages, user, onClose, onChanged }) {
-  const [noCreditSet, setNoCreditSet] = useState(new Set()); // keys: `${playerId}:${type}`
+function DayModal({ date, players, enrollments, packages, locations, user, onClose, onChanged }) {
+  const [noCreditSet, setNoCreditSet] = useState(new Set()); // keys: `${playerId}:${colKey}`
   const [records, setRecords] = useState([]);
   const [loadingDay, setLoadingDay] = useState(true);
   const [busyKey, setBusyKey] = useState(null); // prevents double-click while a write is in flight
+  const activeCamps = campsActiveOn(packages, date);
 
   const loadDay = async () => {
     const { data } = await supabase.from("attendance").select("*").eq("date", date);
@@ -901,14 +975,24 @@ function DayModal({ date, players, enrollments, packages, user, onClose, onChang
   };
   useEffect(() => { loadDay(); }, [date]);
 
-  const recordFor = (id, type) => records.find((r) => r.player_id === id && r.session_type === type);
-  const toggleNoCredit = (id, type) => setNoCreditSet((prev) => { const key = `${id}:${type}`; const s = new Set(prev); s.has(key) ? s.delete(key) : s.add(key); return s; });
-  const trainingCount = records.filter((r) => r.session_type === "training").length;
-  const matchCount = records.filter((r) => r.session_type === "match").length;
+  // colKey identifies a column: "training:<locationId>" | "match" | "camp:<packageId>"
+  const recordFor = (playerId, colKey) => records.find((r) => {
+    if (r.player_id !== playerId) return false;
+    if (colKey === "match") return r.session_type === "match";
+    if (colKey.startsWith("training:")) return r.session_type === "training" && r.location_id === colKey.slice(9);
+    if (colKey.startsWith("camp:")) return r.session_type === "camp" && r.camp_package_id === colKey.slice(5);
+    return false;
+  });
+  const toggleNoCredit = (playerId, colKey) => setNoCreditSet((prev) => { const key = `${playerId}:${colKey}`; const s = new Set(prev); s.has(key) ? s.delete(key) : s.add(key); return s; });
+  const countFor = (colKey) => records.filter((r) => {
+    if (colKey === "match") return r.session_type === "match";
+    if (colKey.startsWith("training:")) return r.session_type === "training" && r.location_id === colKey.slice(9);
+    if (colKey.startsWith("camp:")) return r.session_type === "camp" && r.camp_package_id === colKey.slice(5);
+    return false;
+  }).length;
 
-  const handleToggle = async (playerId, type, existing) => {
-    const key = `${playerId}:${type}`;
-    setBusyKey(key);
+  const handleToggle = async (playerId, colKey, existing) => {
+    setBusyKey(`${playerId}:${colKey}`);
     try {
       if (existing) {
         if (existing.enrollment_id) {
@@ -916,17 +1000,28 @@ function DayModal({ date, players, enrollments, packages, user, onClose, onChang
           if (enr && enr.credits !== null) await supabase.from("enrollments").update({ credits_remaining: enr.credits_remaining + 1 }).eq("id", enr.id);
         }
         await supabase.from("attendance").delete().eq("id", existing.id);
-      } else {
-        const noCredit = noCreditSet.has(key);
+      } else if (colKey === "match") {
+        const noCredit = noCreditSet.has(`${playerId}:match`);
         let enrollmentId = null;
         if (!noCredit) {
-          const enr = activeEnrollmentFor(enrollments, playerId, date);
-          if (enr) {
-            enrollmentId = enr.id;
-            if (enr.credits !== null) await supabase.from("enrollments").update({ credits_remaining: enr.credits_remaining - 1 }).eq("id", enr.id);
-          }
+          const enr = nonCampActiveEnrollmentFor(enrollments, packages, playerId, date);
+          if (enr) { enrollmentId = enr.id; if (enr.credits !== null) await supabase.from("enrollments").update({ credits_remaining: enr.credits_remaining - 1 }).eq("id", enr.id); }
         }
-        await supabase.from("attendance").insert({ player_id: playerId, date, session_type: type, enrollment_id: enrollmentId, no_credit: noCredit, created_by: user.id });
+        await supabase.from("attendance").insert({ player_id: playerId, date, session_type: "match", enrollment_id: enrollmentId, no_credit: noCredit, created_by: user.id });
+      } else if (colKey.startsWith("training:")) {
+        const locationId = colKey.slice(9);
+        const noCredit = noCreditSet.has(`${playerId}:${colKey}`);
+        let enrollmentId = null;
+        if (!noCredit) {
+          const enr = nonCampActiveEnrollmentFor(enrollments, packages, playerId, date);
+          if (enr) { enrollmentId = enr.id; if (enr.credits !== null) await supabase.from("enrollments").update({ credits_remaining: enr.credits_remaining - 1 }).eq("id", enr.id); }
+        }
+        await supabase.from("attendance").insert({ player_id: playerId, date, session_type: "training", location_id: locationId, enrollment_id: enrollmentId, no_credit: noCredit, created_by: user.id });
+      } else if (colKey.startsWith("camp:")) {
+        const campPackageId = colKey.slice(5);
+        const campEnr = campEnrollmentFor(enrollments, playerId, campPackageId);
+        if (!campEnr) return; // not enrolled — button should be disabled anyway
+        await supabase.from("attendance").insert({ player_id: playerId, date, session_type: "camp", camp_package_id: campPackageId, enrollment_id: campEnr.id, no_credit: false, created_by: user.id });
       }
       await loadDay();
       await onChanged();
@@ -936,100 +1031,117 @@ function DayModal({ date, players, enrollments, packages, user, onClose, onChang
   };
 
   const countBlock = (label, count, color) => (
-    <div style={{ textAlign: "center", minWidth: 110 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
-      <div className="bam-display" style={{ fontSize: 22, color }}>{count}</div>
-      <div style={{ fontSize: 11, color: "var(--muted)" }}>present</div>
+    <div style={{ textAlign: "center", minWidth: 100 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: ".03em" }}>{label}</div>
+      <div className="bam-display" style={{ fontSize: 20, color }}>{count}</div>
+      <div style={{ fontSize: 10, color: "var(--muted)" }}>present</div>
     </div>
   );
 
+  const columns = [
+    ...locations.map((loc, i) => ({ key: `training:${loc.id}`, label: loc.name, group: "Training Session", color: locationColor(i).fg })),
+    { key: "match", label: "Match Day", group: "Match Day", color: "var(--maroon)" },
+    ...activeCamps.map((camp, i) => ({ key: `camp:${camp.id}`, label: camp.name, group: "Camps", color: campColor(i).fg })),
+  ];
+
   return (
     <Modal title={`Attendance · ${fmtDate(date)}`} onClose={onClose} wide>
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 20, marginBottom: 16 }}>
-        {countBlock("Training Session", trainingCount, "var(--blue)")}
-        {countBlock("Match Day", matchCount, "var(--maroon)")}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        {columns.map((col) => countBlock(col.label, countFor(col.key), col.color))}
       </div>
-      <div style={{ display: "flex", gap: 10, padding: "0 4px 8px", fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase" }}>
-        <div style={{ flex: 1 }}>Player</div>
-        <div style={{ width: 150, textAlign: "center" }}>Training Session</div>
-        <div style={{ width: 150, textAlign: "center" }}>Match Day</div>
-      </div>
-      {loadingDay ? <p style={{ color: "#9494AA" }}>Loading…</p> : (
-        <div style={{ maxHeight: 400, overflowY: "auto" }} className="bam-scroll">
-          {players.map((p) => {
-            const enr = activeEnrollmentFor(enrollments, p.id, date);
-            const trainingRec = recordFor(p.id, "training");
-            const matchRec = recordFor(p.id, "match");
-
-            const cell = (type, rec) => {
-              const c = sessionTypeColor(type);
-              const isPresent = !!rec;
-              const key = `${p.id}:${type}`;
-              return (
-                <div style={{ width: 150, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                  <button className="bam-btn" disabled={busyKey === key} style={{ width: "100%", justifyContent: "center", background: isPresent ? c.fg : "#fff", color: isPresent ? "#fff" : c.fg, border: `1px solid ${c.fg}`, fontSize: 12, padding: "6px 8px" }} onClick={() => handleToggle(p.id, type, rec)}>
-                    {isPresent ? <><CheckCircle2 size={13} /> Present</> : <><Circle size={13} /> Mark present</>}
-                  </button>
-                  {!isPresent && (
-                    <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4, color: "var(--muted)", cursor: "pointer", textAlign: "center" }}>
-                      <input type="checkbox" checked={noCreditSet.has(key)} onChange={() => toggleNoCredit(p.id, type)} /> No credit
-                    </label>
-                  )}
-                  {isPresent && rec.no_credit && <div style={{ fontSize: 10, color: "var(--blue)", textAlign: "center" }}>No credit deducted</div>}
-                  {isPresent && !rec.no_credit && !rec.enrollment_id && <div style={{ fontSize: 10, color: "var(--red)", textAlign: "center" }}>No package</div>}
-                </div>
-              );
-            };
-
-            return (
-              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: "1px solid var(--line)" }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}{p.nickname ? <span style={{ color: "var(--muted)", fontWeight: 400 }}> "{p.nickname}"</span> : ""}</div>
-                  <div style={{ fontSize: 12, color: enr ? "var(--muted)" : "var(--red)" }}>{enr ? `${enr.package_name} · ${enr.credits !== null ? enr.credits_remaining + " credits left" : "unlimited"}` : "No active package"}</div>
-                </div>
-                {cell("training", trainingRec)}
-                {cell("match", matchRec)}
-              </div>
-            );
-          })}
-          {players.length === 0 && <p style={{ color: "#9494AA", fontSize: 13 }}>Add players first.</p>}
+      <div style={{ overflowX: "auto" }} className="bam-scroll">
+        <div style={{ minWidth: 260 + columns.length * 150 }}>
+          <div style={{ display: "flex", gap: 10, padding: "0 4px 8px", fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase" }}>
+            <div style={{ flex: 1, minWidth: 200 }}>Player</div>
+            {columns.map((col) => <div key={col.key} style={{ width: 150, textAlign: "center" }}>{col.label}</div>)}
+          </div>
+          {loadingDay ? <p style={{ color: "#9494AA" }}>Loading…</p> : (
+            <div style={{ maxHeight: 400, overflowY: "auto" }} className="bam-scroll">
+              {players.map((p) => {
+                const enr = nonCampActiveEnrollmentFor(enrollments, packages, p.id, date);
+                return (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: "1px solid var(--line)" }}>
+                    <div style={{ flex: 1, minWidth: 200 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}{p.nickname ? <span style={{ color: "var(--muted)", fontWeight: 400 }}> "{p.nickname}"</span> : ""}</div>
+                      <div style={{ fontSize: 12, color: enr ? "var(--muted)" : "var(--red)" }}>{enr ? `${enr.package_name} · ${enr.credits !== null ? enr.credits_remaining + " credits left" : "unlimited"}` : "No active package"}</div>
+                    </div>
+                    {columns.map((col) => {
+                      const isCampCol = col.key.startsWith("camp:");
+                      const campEnr = isCampCol ? campEnrollmentFor(enrollments, p.id, col.key.slice(5)) : null;
+                      const notEnrolledInCamp = isCampCol && !campEnr;
+                      const rec = recordFor(p.id, col.key);
+                      const isPresent = !!rec;
+                      const busy = busyKey === `${p.id}:${col.key}`;
+                      return (
+                        <div key={col.key} style={{ width: 150, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                          <button className="bam-btn" disabled={busy || notEnrolledInCamp} title={notEnrolledInCamp ? "Not enrolled in this camp" : ""} style={{ width: "100%", justifyContent: "center", background: isPresent ? col.color : "#fff", color: isPresent ? "#fff" : col.color, border: `1px solid ${col.color}`, fontSize: 12, padding: "6px 8px" }} onClick={() => handleToggle(p.id, col.key, rec)}>
+                            {isPresent ? <><CheckCircle2 size={13} /> Present</> : notEnrolledInCamp ? "Not enrolled" : <><Circle size={13} /> Mark present</>}
+                          </button>
+                          {!isPresent && !isCampCol && (
+                            <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4, color: "var(--muted)", cursor: "pointer", textAlign: "center" }}>
+                              <input type="checkbox" checked={noCreditSet.has(`${p.id}:${col.key}`)} onChange={() => toggleNoCredit(p.id, col.key)} /> No credit
+                            </label>
+                          )}
+                          {isPresent && rec.no_credit && <div style={{ fontSize: 10, color: "var(--blue)", textAlign: "center" }}>No credit deducted</div>}
+                          {isPresent && !rec.no_credit && !isCampCol && !rec.enrollment_id && <div style={{ fontSize: 10, color: "var(--red)", textAlign: "center" }}>No package</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+              {players.length === 0 && <p style={{ color: "#9494AA", fontSize: 13 }}>Add players first.</p>}
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </Modal>
   );
 }
 
 /* --------------------------------- Packages --------------------------------- */
 function PackagesTab({ packages, enrollments, onAdd, onEdit, onDelete }) {
-  const sorted = [...packages].sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
+  const CATEGORY_LABELS = { standard: "Standard Packages", special_program: "Special Programs", camp: "Camps" };
+  const CATEGORY_ORDER = ["standard", "special_program", "camp"];
+  const grouped = {};
+  packages.forEach((pkg) => { const cat = pkg.category || "standard"; (grouped[cat] = grouped[cat] || []).push(pkg); });
+  Object.values(grouped).forEach((list) => list.sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999)));
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 className="bam-display" style={{ fontSize: 21, margin: 0 }}>Packages</h2>
         <button className="bam-btn bam-btn-primary" onClick={onAdd}><Plus size={15} /> Add Package</button>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {sorted.map((pkg) => {
-          const active = enrollments.filter((e) => e.package_id === pkg.id && enrollmentStatus(e, todayStr()) === "active").length;
-          return (
-            <div key={pkg.id} className="bam-card" style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
-              <div style={{ flex: "2 1 220px", minWidth: 200 }}>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{pkg.name}</div>
-                <div style={{ fontSize: 13, color: "var(--muted)" }}>{pkg.description}</div>
-              </div>
-              <div style={{ flex: "1 1 180px", fontSize: 12, color: "#9494AA", minWidth: 160 }}>
-                {pkg.credits !== null ? `${pkg.credits} credits · ` : "Unlimited · "}{pkg.expiry_days} days{pkg.terms > 1 ? ` · ${pkg.terms} terms of ${fmtMoney(pkg.amount / pkg.terms)}` : ""}
-              </div>
-              <div className="bam-display" style={{ fontSize: 17, minWidth: 100, textAlign: "right" }}>{fmtMoney(pkg.amount)}</div>
-              <div className="bam-badge" style={{ background: "#E9EFF9", color: "var(--blue)", flexShrink: 0 }}>{active} active</div>
-              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => onEdit({ id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiryDays: pkg.expiry_days, terms: pkg.terms, sortOrder: pkg.sort_order })}><Pencil size={13} /></button>
-                <button className="bam-btn bam-btn-danger" style={{ padding: 6 }} onClick={() => { if (confirm(`Remove ${pkg.name}?`)) onDelete(pkg.id); }}><Trash2 size={13} /></button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      {CATEGORY_ORDER.filter((cat) => grouped[cat]?.length).map((cat) => (
+        <div key={cat} style={{ marginBottom: 22 }}>
+          <h3 style={{ fontSize: 13, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>{CATEGORY_LABELS[cat]}</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {grouped[cat].map((pkg) => {
+              const active = enrollments.filter((e) => e.package_id === pkg.id && enrollmentStatus(e, todayStr()) === "active").length;
+              return (
+                <div key={pkg.id} className="bam-card" style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+                  <div style={{ flex: "2 1 220px", minWidth: 200 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15 }}>{pkg.name}</div>
+                    <div style={{ fontSize: 13, color: "var(--muted)" }}>{pkg.description}</div>
+                  </div>
+                  <div style={{ flex: "1 1 180px", fontSize: 12, color: "#9494AA", minWidth: 160 }}>
+                    {cat === "camp"
+                      ? `${fmtDate(pkg.camp_start_date)} → ${fmtDate(pkg.camp_end_date)} · kit included`
+                      : <>{pkg.credits !== null ? `${pkg.credits} credits · ` : "Unlimited · "}{pkg.expiry_days} days{pkg.terms > 1 ? ` · ${pkg.terms} terms of ${fmtMoney(pkg.amount / pkg.terms)}` : ""}</>}
+                  </div>
+                  <div className="bam-display" style={{ fontSize: 17, minWidth: 100, textAlign: "right" }}>{fmtMoney(pkg.amount)}</div>
+                  <div className="bam-badge" style={{ background: "#E9EFF9", color: "var(--blue)", flexShrink: 0 }}>{active} active</div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => onEdit({ id: pkg.id, name: pkg.name, description: pkg.description, amount: pkg.amount, credits: pkg.credits, expiryDays: pkg.expiry_days, terms: pkg.terms, sortOrder: pkg.sort_order, category: pkg.category, campStartDate: pkg.camp_start_date, campEndDate: pkg.camp_end_date })}><Pencil size={13} /></button>
+                    <button className="bam-btn bam-btn-danger" style={{ padding: 6 }} onClick={() => { if (confirm(`Remove ${pkg.name}?`)) onDelete(pkg.id); }}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1038,37 +1150,125 @@ function PackageModal({ pkg, onClose, onSave }) {
   const [name, setName] = useState(pkg.name || "");
   const [description, setDescription] = useState(pkg.description || "");
   const [amount, setAmount] = useState(pkg.amount ?? 0);
+  const [category, setCategory] = useState(pkg.category || "standard");
   const [unlimited, setUnlimited] = useState(pkg.credits === null || pkg.credits === undefined);
   const [credits, setCredits] = useState(pkg.credits ?? 10);
   const [expiryDays, setExpiryDays] = useState(pkg.expiryDays ?? 30);
   const [terms, setTerms] = useState(pkg.terms ?? 1);
   const [sortOrder, setSortOrder] = useState(pkg.sortOrder ?? 99);
+  const [campStartDate, setCampStartDate] = useState(pkg.campStartDate || todayStr());
+  const [campEndDate, setCampEndDate] = useState(pkg.campEndDate || todayStr());
+  const isCamp = category === "camp";
+
   const submit = () => {
     if (!name.trim()) { alert("Package name is required."); return; }
-    if (!expiryDays || expiryDays <= 0) { alert("Expiry days must be greater than 0."); return; }
-    onSave({ id: pkg.id || uid(), name: name.trim(), description: description.trim(), amount: Number(amount) || 0, credits: unlimited ? null : (Number(credits) || 0), expiryDays: Number(expiryDays), terms: Number(terms) || 1, sortOrder: Number(sortOrder) || 0 });
+    if (isCamp) {
+      if (!campStartDate || !campEndDate) { alert("Set both camp dates."); return; }
+      if (campEndDate < campStartDate) { alert("Camp end date must be on or after the start date."); return; }
+    } else if (!expiryDays || expiryDays <= 0) { alert("Expiry days must be greater than 0."); return; }
+    onSave({
+      id: pkg.id || uid(), name: name.trim(), description: description.trim(), amount: Number(amount) || 0,
+      category, credits: isCamp ? null : (unlimited ? null : (Number(credits) || 0)),
+      expiryDays: Number(expiryDays) || 1, terms: isCamp ? 1 : (Number(terms) || 1), sortOrder: Number(sortOrder) || 0,
+      campStartDate: isCamp ? campStartDate : null, campEndDate: isCamp ? campEndDate : null,
+    });
   };
   return (
     <Modal title={pkg.id ? "Edit Package" : "Add Package"} onClose={onClose}>
+      <label className="bam-label">Category</label>
+      <select className="bam-input" style={{ marginBottom: 12 }} value={category} onChange={(e) => setCategory(e.target.value)}>
+        <option value="standard">Standard Package</option>
+        <option value="special_program">Special Program</option>
+        <option value="camp">Camp</option>
+      </select>
       <label className="bam-label">Package Name</label>
       <input className="bam-input" style={{ marginBottom: 12 }} value={name} onChange={(e) => setName(e.target.value)} />
       <label className="bam-label">Description</label>
       <input className="bam-input" style={{ marginBottom: 12 }} value={description} onChange={(e) => setDescription(e.target.value)} />
       <label className="bam-label">Amount (₱)</label>
       <input type="number" className="bam-input" style={{ marginBottom: 12 }} value={amount} onChange={(e) => setAmount(e.target.value)} />
-      <label className="bam-label">Session Credits</label>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13 }}><input type="checkbox" checked={unlimited} onChange={(e) => setUnlimited(e.target.checked)} /> Unlimited</label>
-        {!unlimited && <input type="number" className="bam-input" style={{ maxWidth: 120 }} value={credits} onChange={(e) => setCredits(e.target.value)} />}
-      </div>
-      <div style={{ display: "flex", gap: 10 }}>
-        <div style={{ flex: 1 }}><label className="bam-label">Expiry (days)</label><input type="number" className="bam-input" style={{ marginBottom: 16 }} value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} /></div>
-        <div style={{ flex: 1 }}><label className="bam-label">Payment Terms</label><input type="number" min="1" className="bam-input" style={{ marginBottom: 16 }} value={terms} onChange={(e) => setTerms(e.target.value)} /></div>
-      </div>
+
+      {isCamp ? (
+        <>
+          <div className="bam-card" style={{ padding: 12, marginBottom: 12, background: "#F9F9FC" }}>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>Camps run on fixed dates (the same for every player) and include unlimited attendance plus a kit, issued at enrollment.</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}><label className="bam-label">Camp Start Date</label><input type="date" className="bam-input" value={campStartDate} onChange={(e) => setCampStartDate(e.target.value)} /></div>
+              <div style={{ flex: 1 }}><label className="bam-label">Camp End Date</label><input type="date" className="bam-input" value={campEndDate} onChange={(e) => setCampEndDate(e.target.value)} /></div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <label className="bam-label">Session Credits</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13 }}><input type="checkbox" checked={unlimited} onChange={(e) => setUnlimited(e.target.checked)} /> Unlimited</label>
+            {!unlimited && <input type="number" className="bam-input" style={{ maxWidth: 120 }} value={credits} onChange={(e) => setCredits(e.target.value)} />}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}><label className="bam-label">Expiry (days)</label><input type="number" className="bam-input" style={{ marginBottom: 16 }} value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} /></div>
+            <div style={{ flex: 1 }}><label className="bam-label">Payment Terms</label><input type="number" min="1" className="bam-input" style={{ marginBottom: 16 }} value={terms} onChange={(e) => setTerms(e.target.value)} /></div>
+          </div>
+        </>
+      )}
+
       <label className="bam-label">Position in list</label>
       <input type="number" className="bam-input" style={{ marginBottom: 6 }} value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} />
-      <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 0, marginBottom: 16 }}>Lower numbers show first. Packages are shown in this order rather than by price.</p>
+      <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 0, marginBottom: 16 }}>Lower numbers show first within its category section.</p>
       <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit}>Save Package</button>
+    </Modal>
+  );
+}
+
+/* --------------------------------- Locations --------------------------------- */
+function LocationsTab({ locations, onAdd, onEdit, onDelete }) {
+  const sorted = [...locations].sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 className="bam-display" style={{ fontSize: 21, margin: 0 }}>Locations</h2>
+        <button className="bam-btn bam-btn-primary" onClick={onAdd}><Plus size={15} /> Add Location</button>
+      </div>
+      <p style={{ fontSize: 12, color: "#9494AA", marginTop: -8, marginBottom: 16 }}>Disabled locations are kept for future use but won't appear in Attendance until enabled.</p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {sorted.map((loc, i) => {
+          const c = locationColor(i);
+          return (
+            <div key={loc.id} className="bam-card" style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
+              <span style={{ width: 12, height: 12, borderRadius: 4, background: loc.enabled ? c.fg : "#D6D6E2", flexShrink: 0 }} />
+              <div style={{ flex: 1, fontWeight: 700, fontSize: 15 }}>{loc.name}</div>
+              <span className="bam-badge" style={{ background: loc.enabled ? "#E9EFF9" : "#F2F2F5", color: loc.enabled ? "var(--blue)" : "#9494AA" }}>{loc.enabled ? "Enabled" : "Disabled"}</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => onEdit({ id: loc.id, name: loc.name, enabled: loc.enabled, sortOrder: loc.sort_order })}><Pencil size={13} /></button>
+                <button className="bam-btn bam-btn-danger" style={{ padding: 6 }} onClick={() => { if (confirm(`Remove ${loc.name}?`)) onDelete(loc.id); }}><Trash2 size={13} /></button>
+              </div>
+            </div>
+          );
+        })}
+        {sorted.length === 0 && <p style={{ color: "#9494AA" }}>No locations yet.</p>}
+      </div>
+    </div>
+  );
+}
+
+function LocationModal({ loc, onClose, onSave }) {
+  const [name, setName] = useState(loc.name || "");
+  const [enabled, setEnabled] = useState(loc.enabled ?? true);
+  const [sortOrder, setSortOrder] = useState(loc.sortOrder ?? 99);
+  const submit = () => {
+    if (!name.trim()) { alert("Location name is required."); return; }
+    onSave({ id: loc.id, name: name.trim(), enabled, sortOrder: Number(sortOrder) || 0 });
+  };
+  return (
+    <Modal title={loc.id ? "Edit Location" : "Add Location"} onClose={onClose}>
+      <label className="bam-label">Location Name</label>
+      <input className="bam-input" style={{ marginBottom: 12 }} value={name} onChange={(e) => setName(e.target.value)} />
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, marginBottom: 12 }}>
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled — appears in Attendance
+      </label>
+      <label className="bam-label">Position in list</label>
+      <input type="number" className="bam-input" style={{ marginBottom: 16 }} value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} />
+      <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit}>Save Location</button>
     </Modal>
   );
 }
@@ -1498,7 +1698,7 @@ function RevenueTab({ players }) {
 
   return (
     <div>
-      <h2 className="bam-display" style={{ fontSize: 21, marginBottom: 16 }}>Revenue</h2>
+      <h2 className="bam-display" style={{ fontSize: 21, marginBottom: 16 }}>Enrollment</h2>
       <div style={{ display: "flex", gap: 14, marginBottom: 20, flexWrap: "wrap" }}>
         {stat("Today", totalToday, "var(--maroon)")}
         {stat("This Month", totalMonth, "var(--blue)")}
@@ -1584,10 +1784,27 @@ function ParentModal({ parent, onClose, onSave }) {
   );
 }
 
-function EnrollModal({ player, packages, onClose, onSave }) {
+function EnrollModal({ player, packages, merch, onClose, onSave }) {
   const [packageId, setPackageId] = useState(packages[0]?.id || "");
   const [start, setStart] = useState(todayStr());
+  const [jerseySkuId, setJerseySkuId] = useState("");
+  const [shortSkuId, setShortSkuId] = useState("");
   const pkg = packages.find((p) => p.id === packageId);
+  const isCamp = pkg?.category === "camp";
+
+  const jerseyOptions = merch.filter((m) => m.item.toLowerCase().includes("jersey"));
+  const shortOptions = merch.filter((m) => m.item.toLowerCase().includes("short"));
+
+  const submit = () => {
+    if (!packageId) { alert("Choose a package."); return; }
+    if (isCamp) {
+      if (!jerseySkuId || !shortSkuId) { alert("Choose the jersey and shorts size for this player's camp kit."); return; }
+      onSave(packageId, pkg.camp_start_date, { jerseySkuId, shortsSkuId: shortSkuId });
+    } else {
+      onSave(packageId, start);
+    }
+  };
+
   return (
     <Modal title={`Enroll ${player ? player.name : ""}`} onClose={onClose}>
       <label className="bam-label">Package</label>
@@ -1597,12 +1814,35 @@ function EnrollModal({ player, packages, onClose, onSave }) {
       {pkg && (
         <div className="bam-card" style={{ padding: 12, marginBottom: 12, background: "#F9F9FC" }}>
           <div style={{ fontSize: 13, color: "var(--muted)" }}>{pkg.description}</div>
-          <div style={{ fontSize: 13, marginTop: 4 }}>{pkg.credits !== null ? `${pkg.credits} credits` : "Unlimited sessions"} · expires {pkg.expiry_days} days after start{pkg.terms > 1 ? ` · ${pkg.terms} terms of ${fmtMoney(pkg.amount / pkg.terms)}` : ""}</div>
+          <div style={{ fontSize: 13, marginTop: 4 }}>
+            {isCamp
+              ? `${fmtDate(pkg.camp_start_date)} → ${fmtDate(pkg.camp_end_date)} · unlimited attendance · kit included`
+              : <>{pkg.credits !== null ? `${pkg.credits} credits` : "Unlimited sessions"} · expires {pkg.expiry_days} days after start{pkg.terms > 1 ? ` · ${pkg.terms} terms of ${fmtMoney(pkg.amount / pkg.terms)}` : ""}</>}
+          </div>
         </div>
       )}
-      <label className="bam-label">Start Date</label>
-      <input type="date" className="bam-input" style={{ marginBottom: 16 }} value={start} onChange={(e) => setStart(e.target.value)} />
-      <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={() => { if (!packageId) { alert("Choose a package."); return; } onSave(packageId, start); }}>Confirm Enrollment</button>
+
+      {isCamp ? (
+        <>
+          <label className="bam-label">Jersey (kit)</label>
+          <select className="bam-input" style={{ marginBottom: 12 }} value={jerseySkuId} onChange={(e) => setJerseySkuId(e.target.value)}>
+            <option value="">Choose jersey size…</option>
+            {jerseyOptions.map((m) => <option key={m.id} value={m.id} disabled={m.stock <= 0}>{m.item} — {m.size} ({m.stock} in stock)</option>)}
+          </select>
+          <label className="bam-label">Shorts (kit)</label>
+          <select className="bam-input" style={{ marginBottom: 16 }} value={shortSkuId} onChange={(e) => setShortSkuId(e.target.value)}>
+            <option value="">Choose shorts size…</option>
+            {shortOptions.map((m) => <option key={m.id} value={m.id} disabled={m.stock <= 0}>{m.item} — {m.size} ({m.stock} in stock)</option>)}
+          </select>
+          <p style={{ fontSize: 11, color: "var(--muted)", marginTop: -10, marginBottom: 16 }}>One of each will be deducted from inventory automatically.</p>
+        </>
+      ) : (
+        <>
+          <label className="bam-label">Start Date</label>
+          <input type="date" className="bam-input" style={{ marginBottom: 16 }} value={start} onChange={(e) => setStart(e.target.value)} />
+        </>
+      )}
+      <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit}>Confirm Enrollment</button>
     </Modal>
   );
 }
