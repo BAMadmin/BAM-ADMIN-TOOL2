@@ -34,8 +34,10 @@ function activeEnrollmentFor(enrollments, playerId, date) {
 }
 const campsActiveOn = (packages, date) => packages.filter((p) => p.category === "camp" && p.camp_start_date && p.camp_end_date && p.camp_start_date <= date && date <= p.camp_end_date);
 const campEnrollmentFor = (enrollments, playerId, campPackageId) => enrollments.find((e) => e.player_id === playerId && e.package_id === campPackageId) || null;
+const specialProgramsActiveOn = (packages, enrollments, date) => packages.filter((p) => p.category === "special_program" && enrollments.some((e) => e.package_id === p.id && enrollmentStatus(e, date) === "active" && e.start_date <= date));
+const programEnrollmentFor = (enrollments, playerId, programPackageId, date) => enrollments.find((e) => e.player_id === playerId && e.package_id === programPackageId && enrollmentStatus(e, date) === "active" && e.start_date <= date) || null;
 function nonCampActiveEnrollmentFor(enrollments, packages, playerId, date) {
-  const filtered = enrollments.filter((e) => { const p = packages.find((pk) => pk.id === e.package_id); return !p || p.category !== "camp"; });
+  const filtered = enrollments.filter((e) => { const p = packages.find((pk) => pk.id === e.package_id); return !p || (p.category !== "camp" && p.category !== "special_program"); });
   return activeEnrollmentFor(filtered, playerId, date);
 }
 const sessionTypeColor = (type) => (type === "match" ? { fg: "var(--maroon)", bg: "#FBEAE9" } : { fg: "var(--blue)", bg: "#E9EFF9" });
@@ -52,6 +54,12 @@ const CAMP_COLORS = [
   { fg: "#3B7A5A", bg: "#E7F5EE" },
 ];
 const campColor = (index) => CAMP_COLORS[index % CAMP_COLORS.length];
+const PROGRAM_COLORS = [
+  { fg: "#B7791F", bg: "#FBF1DE" },
+  { fg: "#8B6D0F", bg: "#F7F0DC" },
+  { fg: "#A16207", bg: "#FAF0DA" },
+];
+const programColor = (index) => PROGRAM_COLORS[index % PROGRAM_COLORS.length];
 const FULL_KIT_PRICE = 4500;
 const STANDARD_SIZES = ["XS Kids", "S Kids", "M Kids", "L Kids", "XL Kids", "S Adult", "M Adult", "L Adult", "XL Adult"];
 const SOCK_SIZES = ["S", "M", "L", "XL"];
@@ -255,6 +263,7 @@ function ClubApp({ user }) {
   const [dayModal, setDayModal] = useState(null);
   const [merchModal, setMerchModal] = useState(null);
   const [stockModal, setStockModal] = useState(null);
+  const [removeStockModal, setRemoveStockModal] = useState(null);
   const [packageModal, setPackageModal] = useState(null);
   const [locationModal, setLocationModal] = useState(null);
   const [search, setSearch] = useState("");
@@ -392,7 +401,13 @@ function ClubApp({ user }) {
   const deleteMerch = async (id) => { await supabase.from("merchandise").delete().eq("id", id); await fetchCore(); };
   const addStock = async (sku, qty, note) => {
     await supabase.from("merchandise").update({ stock: sku.stock + qty }).eq("id", sku.id);
-    await supabase.from("stock_log").insert({ sku_id: sku.id, item: sku.item, size: sku.size, qty, note, created_by: user.id });
+    await supabase.from("stock_log").insert({ sku_id: sku.id, item: sku.item, size: sku.size, qty, reason: "restock", note, created_by: user.id });
+    await fetchCore();
+  };
+  const removeStock = async (sku, qty, reason, note) => {
+    const capped = Math.min(qty, sku.stock); // never go below 0
+    await supabase.from("merchandise").update({ stock: sku.stock - capped }).eq("id", sku.id);
+    await supabase.from("stock_log").insert({ sku_id: sku.id, item: sku.item, size: sku.size, qty: -capped, reason, note, created_by: user.id });
     await fetchCore();
   };
 
@@ -502,7 +517,7 @@ function ClubApp({ user }) {
         {tab === "packages" && <PackagesTab packages={packages} enrollments={enrollments} onAdd={() => setPackageModal({ sortOrder: Math.max(0, ...packages.map((p) => p.sort_order || 0)) + 1 })} onEdit={(p) => setPackageModal(p)} onDelete={deletePackage} />}
         {tab === "locations" && <LocationsTab locations={locations} onAdd={() => setLocationModal({ sortOrder: Math.max(0, ...locations.map((l) => l.sort_order || 0)) + 1 })} onEdit={(l) => setLocationModal(l)} onDelete={deleteLocation} />}
         {tab === "merch" && <MerchTab merch={merch} onAdd={() => setMerchModal({ bulk: true })} onEdit={(m) => setMerchModal(m)} onDelete={deleteMerch} />}
-        {tab === "inventory" && <InventoryTab merch={merch} onAddStock={(m) => setStockModal(m)} />}
+        {tab === "inventory" && <InventoryTab merch={merch} onAddStock={(m) => setStockModal(m)} onRemoveStock={(m) => setRemoveStockModal(m)} />}
         {tab === "sales" && <SalesTab players={players} merch={merch} user={user} onSaleRecorded={fetchCore} />}
         {tab === "revenue" && <RevenueTab players={players} />}
       </div>
@@ -518,6 +533,7 @@ function ClubApp({ user }) {
           : <EditMerchModal sku={merchModal} onClose={() => setMerchModal(null)} onSave={async (m) => { await upsertMerch(m); setMerchModal(null); }} />
       )}
       {stockModal && <AddStockModal sku={stockModal} onClose={() => setStockModal(null)} onSave={async (qty, note) => { await addStock(stockModal, qty, note); setStockModal(null); }} />}
+      {removeStockModal && <RemoveStockModal sku={removeStockModal} onClose={() => setRemoveStockModal(null)} onSave={async (qty, reason, note) => { await removeStock(removeStockModal, qty, reason, note); setRemoveStockModal(null); }} />}
     </div>
   );
 }
@@ -896,12 +912,26 @@ function AttendanceTab({ players, enrollments, packages, locations, user, onData
   const monthStart = `${year}-${String(month + 1).padStart(2, "0")}-01`;
   const monthEnd = `${year}-${String(month + 1).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
   const enabledLocations = locations.filter((l) => l.enabled).sort((a, b) => (a.sort_order ?? 99) - (b.sort_order ?? 99));
+  const [exportFrom, setExportFrom] = useState(monthStart);
+  const [exportTo, setExportTo] = useState(monthEnd);
+  const [exporting, setExporting] = useState(false);
 
   const loadMonth = async () => {
-    const { data } = await supabase.from("attendance").select("date, session_type, location_id, camp_package_id").gte("date", monthStart).lte("date", monthEnd);
+    const { data } = await supabase.from("attendance").select("date, session_type, location_id, camp_package_id, special_program_package_id").gte("date", monthStart).lte("date", monthEnd);
     setMonthAttendance(data || []);
   };
   useEffect(() => { loadMonth(); }, [year, month]);
+
+  // Camps/programs active at any point in the visible month, for the legend
+  const campsThisMonth = [];
+  const programsThisMonth = [];
+  { const seenCamp = new Set(), seenProg = new Set();
+    for (let d = 1; d <= daysInMonth; d++) {
+      const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      campsActiveOn(packages, ds).forEach((c) => { if (!seenCamp.has(c.id)) { seenCamp.add(c.id); campsThisMonth.push(c); } });
+      specialProgramsActiveOn(packages, enrollments, ds).forEach((p) => { if (!seenProg.has(p.id)) { seenProg.add(p.id); programsThisMonth.push(p); } });
+    }
+  }
 
   const linesFor = (day) => {
     const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
@@ -912,24 +942,68 @@ function AttendanceTab({ players, enrollments, packages, locations, user, onData
       const n = dayRecords.filter((a) => a.session_type === "training" && a.location_id === loc.id).length;
       if (n > 0) lines.push({ label: `TS ${loc.name}`, count: n, color: c.fg });
     });
-    const matchCount = dayRecords.filter((a) => a.session_type === "match").length;
-    if (matchCount > 0) lines.push({ label: "Match", count: matchCount, color: "var(--maroon)" });
     campsActiveOn(packages, ds).forEach((camp, i) => {
       const n = dayRecords.filter((a) => a.session_type === "camp" && a.camp_package_id === camp.id).length;
       if (n > 0) lines.push({ label: camp.name, count: n, color: campColor(i).fg });
     });
+    specialProgramsActiveOn(packages, enrollments, ds).forEach((prog, i) => {
+      const n = dayRecords.filter((a) => a.session_type === "special_program" && a.special_program_package_id === prog.id).length;
+      if (n > 0) lines.push({ label: prog.name, count: n, color: programColor(i).fg });
+    });
+    const matchCount = dayRecords.filter((a) => a.session_type === "match").length;
+    if (matchCount > 0) lines.push({ label: "Match", count: matchCount, color: "var(--maroon)" });
     return lines;
   };
+
+  const exportData = async () => {
+    setExporting(true);
+    try {
+      const { data } = await supabase.from("attendance").select("*").gte("date", exportFrom).lte("date", exportTo);
+      const rows = data || [];
+      const grouped = {};
+      rows.forEach((a) => {
+        const key = a.player_id + "|" + a.date;
+        if (!grouped[key]) grouped[key] = { player_id: a.player_id, date: a.date, flags: new Set() };
+        if (a.session_type === "training") grouped[key].flags.add(`loc:${a.location_id}`);
+        else if (a.session_type === "match") grouped[key].flags.add("match");
+        else if (a.session_type === "camp") grouped[key].flags.add(`camp:${a.camp_package_id}`);
+        else if (a.session_type === "special_program") grouped[key].flags.add(`prog:${a.special_program_package_id}`);
+      });
+      const locIds = new Set(rows.filter((r) => r.session_type === "training").map((r) => r.location_id));
+      const campIds = new Set(rows.filter((r) => r.session_type === "camp").map((r) => r.camp_package_id));
+      const progIds = new Set(rows.filter((r) => r.session_type === "special_program").map((r) => r.special_program_package_id));
+      const hasMatch = rows.some((r) => r.session_type === "match");
+
+      const locCols = locations.filter((l) => locIds.has(l.id)).sort((a, b) => (a.sort_order ?? 99) - (b.sort_order ?? 99)).map((l) => ({ key: `loc:${l.id}`, header: `Training Session ${l.name}` }));
+      const campCols = packages.filter((p) => p.category === "camp" && campIds.has(p.id)).map((p) => ({ key: `camp:${p.id}`, header: p.name }));
+      const progCols = packages.filter((p) => p.category === "special_program" && progIds.has(p.id)).map((p) => ({ key: `prog:${p.id}`, header: p.name }));
+      const cols = [...locCols, ...campCols, ...progCols, ...(hasMatch ? [{ key: "match", header: "Match Day" }] : [])];
+
+      const csvRows = [["Date", "Player Name", "Nickname", "Birthday", ...cols.map((c) => c.header)]];
+      Object.values(grouped)
+        .sort((a, b) => a.date.localeCompare(b.date) || a.player_id.localeCompare(b.player_id))
+        .forEach((g) => {
+          const player = players.find((p) => p.id === g.player_id);
+          if (!player) return;
+          csvRows.push([g.date, player.name, player.nickname || "", player.birth_date, ...cols.map((c) => (g.flags.has(c.key) ? "Yes" : ""))]);
+        });
+      downloadCSV(`attendance_${exportFrom}_to_${exportTo}.csv`, csvRows);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const legendRow = (label, color) => (
+    <div key={label} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
+      <span style={{ width: 9, height: 9, borderRadius: 3, background: color, display: "inline-block", flexShrink: 0 }} /> {label}
+    </div>
+  );
 
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
         <h2 className="bam-display" style={{ fontSize: 21, margin: 0 }}>Attendance Calendar</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-          {enabledLocations.map((loc, i) => (
-            <span key={loc.id} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--muted)" }}><span style={{ width: 9, height: 9, borderRadius: 3, background: locationColor(i).fg, display: "inline-block" }} /> {loc.name}</span>
-          ))}
-          <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--muted)" }}><span style={{ width: 9, height: 9, borderRadius: 3, background: "var(--maroon)", display: "inline-block" }} /> Match</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => setCursor(new Date(year, month - 1, 1))}><ChevronLeft size={15} /></button>
           <span style={{ fontWeight: 700, minWidth: 150, textAlign: "center" }}>{monthLabelStr}</span>
           <button className="bam-btn bam-btn-ghost" style={{ padding: 6 }} onClick={() => setCursor(new Date(year, month + 1, 1))}><ChevronRight size={15} /></button>
@@ -953,7 +1027,26 @@ function AttendanceTab({ players, enrollments, packages, locations, user, onData
           );
         })}
       </div>
-      <p style={{ fontSize: 12, color: "#9494AA", marginTop: 14 }}>Click any day to mark players present. Each location, match day, and active camp gets its own line — only shown on days something actually happened.</p>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20, marginTop: 18, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px" }}>
+          <p style={{ fontSize: 12, color: "#9494AA", margin: "0 0 10px" }}>Click any day to mark players present.</p>
+          {enabledLocations.map((loc, i) => legendRow(`Training Session ${loc.name}`, locationColor(i).fg))}
+          {campsThisMonth.map((camp, i) => legendRow(camp.name, campColor(i).fg))}
+          {programsThisMonth.map((prog, i) => legendRow(prog.name, programColor(i).fg))}
+          {legendRow("Match Day", "var(--maroon)")}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+          <div className="bam-label" style={{ marginBottom: 0 }}>Export coverage</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="date" className="bam-input" style={{ width: 150 }} value={exportFrom} onChange={(e) => setExportFrom(e.target.value)} />
+            <span style={{ color: "var(--muted)", fontSize: 13 }}>to</span>
+            <input type="date" className="bam-input" style={{ width: 150 }} value={exportTo} onChange={(e) => setExportTo(e.target.value)} />
+          </div>
+          <button className="bam-btn bam-btn-ghost" disabled={exporting} onClick={exportData}><Download size={14} /> {exporting ? "Preparing…" : "Export Data"}</button>
+        </div>
+      </div>
+
       {dayModalDate && (
         <DayModal date={dayModalDate} players={players} enrollments={enrollments} packages={packages} locations={enabledLocations} user={user}
           onClose={() => setDayModalDate(null)}
@@ -971,6 +1064,7 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
   const [search, setSearch] = useState("");
   const rowRefs = useRef({});
   const activeCamps = campsActiveOn(packages, date);
+  const activePrograms = specialProgramsActiveOn(packages, enrollments, date);
 
   const loadDay = async () => {
     const { data } = await supabase.from("attendance").select("*").eq("date", date);
@@ -979,12 +1073,13 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
   };
   useEffect(() => { loadDay(); }, [date]);
 
-  // colKey identifies a column: "training:<locationId>" | "match" | "camp:<packageId>"
+  // colKey identifies a column: "training:<locationId>" | "match" | "camp:<packageId>" | "program:<packageId>"
   const recordFor = (playerId, colKey) => records.find((r) => {
     if (r.player_id !== playerId) return false;
     if (colKey === "match") return r.session_type === "match";
     if (colKey.startsWith("training:")) return r.session_type === "training" && r.location_id === colKey.slice(9);
     if (colKey.startsWith("camp:")) return r.session_type === "camp" && r.camp_package_id === colKey.slice(5);
+    if (colKey.startsWith("program:")) return r.session_type === "special_program" && r.special_program_package_id === colKey.slice(8);
     return false;
   });
   const toggleNoCredit = (playerId, colKey) => setNoCreditSet((prev) => { const key = `${playerId}:${colKey}`; const s = new Set(prev); s.has(key) ? s.delete(key) : s.add(key); return s; });
@@ -992,6 +1087,7 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
     if (colKey === "match") return r.session_type === "match";
     if (colKey.startsWith("training:")) return r.session_type === "training" && r.location_id === colKey.slice(9);
     if (colKey.startsWith("camp:")) return r.session_type === "camp" && r.camp_package_id === colKey.slice(5);
+    if (colKey.startsWith("program:")) return r.session_type === "special_program" && r.special_program_package_id === colKey.slice(8);
     return false;
   }).length;
 
@@ -1026,6 +1122,12 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
         const campEnr = campEnrollmentFor(enrollments, playerId, campPackageId);
         if (!campEnr) return; // not enrolled — button should be disabled anyway
         await supabase.from("attendance").insert({ player_id: playerId, date, session_type: "camp", camp_package_id: campPackageId, enrollment_id: campEnr.id, no_credit: false, created_by: user.id });
+      } else if (colKey.startsWith("program:")) {
+        const programPackageId = colKey.slice(8);
+        const progEnr = programEnrollmentFor(enrollments, playerId, programPackageId, date);
+        if (!progEnr) return; // not enrolled — button should be disabled anyway
+        if (progEnr.credits !== null) await supabase.from("enrollments").update({ credits_remaining: progEnr.credits_remaining - 1 }).eq("id", progEnr.id);
+        await supabase.from("attendance").insert({ player_id: playerId, date, session_type: "special_program", special_program_package_id: programPackageId, enrollment_id: progEnr.id, no_credit: false, created_by: user.id });
       }
       await loadDay();
       await onChanged();
@@ -1043,9 +1145,10 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
   );
 
   const columns = [
-    ...locations.map((loc, i) => ({ key: `training:${loc.id}`, label: loc.name, group: "Training Session", color: locationColor(i).fg })),
+    ...locations.map((loc, i) => ({ key: `training:${loc.id}`, label: `Training Session ${loc.name}`, group: "Training Session", color: locationColor(i).fg })),
     { key: "match", label: "Match Day", group: "Match Day", color: "var(--maroon)" },
     ...activeCamps.map((camp, i) => ({ key: `camp:${camp.id}`, label: camp.name, group: "Camps", color: campColor(i).fg })),
+    ...activePrograms.map((prog, i) => ({ key: `program:${prog.id}`, label: prog.name, group: "Special Programs", color: programColor(i).fg })),
   ];
 
   const isMatch = (p) => search.trim() && (p.name.toLowerCase().includes(search.trim().toLowerCase()) || (p.nickname || "").toLowerCase().includes(search.trim().toLowerCase()));
@@ -1087,23 +1190,26 @@ function DayModal({ date, players, enrollments, packages, locations, user, onClo
                     </div>
                     {columns.map((col) => {
                       const isCampCol = col.key.startsWith("camp:");
+                      const isProgramCol = col.key.startsWith("program:");
+                      const isUnlimitedGroupCol = isCampCol || isProgramCol;
                       const campEnr = isCampCol ? campEnrollmentFor(enrollments, p.id, col.key.slice(5)) : null;
-                      const notEnrolledInCamp = isCampCol && !campEnr;
+                      const progEnr = isProgramCol ? programEnrollmentFor(enrollments, p.id, col.key.slice(8), date) : null;
+                      const notEnrolled = (isCampCol && !campEnr) || (isProgramCol && !progEnr);
                       const rec = recordFor(p.id, col.key);
                       const isPresent = !!rec;
                       const busy = busyKey === `${p.id}:${col.key}`;
                       return (
                         <div key={col.key} style={{ width: 150, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                          <button className="bam-btn" disabled={busy || notEnrolledInCamp} title={notEnrolledInCamp ? "Not enrolled in this camp" : ""} style={{ width: "100%", justifyContent: "center", background: isPresent ? col.color : "#fff", color: isPresent ? "#fff" : col.color, border: `1px solid ${col.color}`, fontSize: 12, padding: "6px 8px" }} onClick={() => handleToggle(p.id, col.key, rec)}>
-                            {isPresent ? <><CheckCircle2 size={13} /> Present</> : notEnrolledInCamp ? "Not enrolled" : <><Circle size={13} /> Mark present</>}
+                          <button className="bam-btn" disabled={busy || notEnrolled} title={notEnrolled ? "Not enrolled" : ""} style={{ width: "100%", justifyContent: "center", background: isPresent ? col.color : "#fff", color: isPresent ? "#fff" : col.color, border: `1px solid ${col.color}`, fontSize: 12, padding: "6px 8px" }} onClick={() => handleToggle(p.id, col.key, rec)}>
+                            {isPresent ? <><CheckCircle2 size={13} /> Present</> : notEnrolled ? "Not enrolled" : <><Circle size={13} /> Mark present</>}
                           </button>
-                          {!isPresent && !isCampCol && (
+                          {!isPresent && !isUnlimitedGroupCol && (
                             <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4, color: "var(--muted)", cursor: "pointer", textAlign: "center" }}>
-                              <input type="checkbox" checked={noCreditSet.has(`${p.id}:${col.key}`)} onChange={() => toggleNoCredit(p.id, col.key)} /> No credit
+                              <input type="checkbox" checked={noCreditSet.has(`${p.id}:${col.key}`)} onChange={() => toggleNoCredit(p.id, col.key)} /> No credit deduction
                             </label>
                           )}
-                          {isPresent && rec.no_credit && <div style={{ fontSize: 10, color: "var(--blue)", textAlign: "center" }}>No credit deducted</div>}
-                          {isPresent && !rec.no_credit && !isCampCol && !rec.enrollment_id && <div style={{ fontSize: 10, color: "var(--red)", textAlign: "center" }}>No package</div>}
+                          {isPresent && rec.no_credit && <div style={{ fontSize: 10, color: "var(--red)", textAlign: "center" }}>No credit deducted</div>}
+                          {isPresent && !rec.no_credit && !isUnlimitedGroupCol && !rec.enrollment_id && <div style={{ fontSize: 10, color: col.color, textAlign: "center" }}>Credit deducted</div>}
                         </div>
                       );
                     })}
@@ -1389,7 +1495,7 @@ function AddProductModal({ onClose, onSave }) {
 }
 
 /* -------------------------------- Inventory (recent restock log) --------------------------------- */
-function InventoryTab({ merch, onAddStock }) {
+function InventoryTab({ merch, onAddStock, onRemoveStock }) {
   const [recentLog, setRecentLog] = useState([]);
   useEffect(() => { (async () => { const { data } = await supabase.from("stock_log").select("*").order("created_at", { ascending: false }).limit(300); setRecentLog(data || []); })(); }, []);
 
@@ -1397,14 +1503,15 @@ function InventoryTab({ merch, onAddStock }) {
   const totalValue = merch.reduce((s, m) => s + m.stock * m.price, 0);
   const grouped = {};
   merch.forEach((m) => { (grouped[m.item] = grouped[m.item] || []).push(m); });
-  const lastRestock = (skuId) => recentLog.find((l) => l.sku_id === skuId) || null;
+  const lastRestock = (skuId) => recentLog.find((l) => l.sku_id === skuId && l.qty > 0) || null;
   const latest = recentLog[0];
+  const REASON_LABELS = { restock: "Restock", damaged: "Damaged (returned)", lost: "Lost/stolen", correction: "Stock count correction", other: "Other" };
 
   const exportCSV = () => {
-    const rows = [["Item", "Size", "Price", "Remaining Stock", "Last Restocked (last 300 entries)", "Restocked By"]];
+    const rows = [["Item", "Size", "Price", "Remaining Stock", "Last Restocked"]];
     Object.keys(grouped).sort().forEach((itemName) => grouped[itemName].forEach((m) => {
       const lr = lastRestock(m.id);
-      rows.push([itemName, m.size, m.price, m.stock, lr ? fmtDateTime(lr.created_at) : "", ""]);
+      rows.push([itemName, m.size, m.price, m.stock, lr ? fmtDateTime(lr.created_at) : ""]);
     }));
     downloadCSV("inventory.csv", rows);
   };
@@ -1423,13 +1530,13 @@ function InventoryTab({ merch, onAddStock }) {
         <div className="bam-card" style={{ padding: 16, flex: 1, minWidth: 160 }}><div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>Inventory value</div><div className="bam-display" style={{ fontSize: 24 }}>{fmtMoney(totalValue)}</div></div>
         <div className="bam-card" style={{ padding: 16, flex: 1, minWidth: 160 }}><div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>Items low on stock (≤3)</div><div className="bam-display" style={{ fontSize: 24, color: "var(--red)" }}>{merch.filter((m) => m.stock <= 3).length}</div></div>
         <div className="bam-card" style={{ padding: 16, flex: 1.4, minWidth: 220 }}>
-          <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600, marginBottom: 4 }}>Latest stock addition</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600, marginBottom: 4 }}>Latest stock activity</div>
           {latest ? (
             <>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{latest.item} — {latest.size} <span style={{ color: "var(--blue)" }}>+{latest.qty}</span></div>
-              <div style={{ fontSize: 12, color: "var(--muted)" }}>{fmtDateTime(latest.created_at)}{latest.note ? ` · ${latest.note}` : ""}</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{latest.item} — {latest.size} <span style={{ color: latest.qty >= 0 ? "var(--blue)" : "var(--red)" }}>{latest.qty >= 0 ? "+" : ""}{latest.qty}</span></div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>{fmtDateTime(latest.created_at)} · {REASON_LABELS[latest.reason] || latest.reason}{latest.note ? ` · ${latest.note}` : ""}</div>
             </>
-          ) : <div style={{ fontSize: 13, color: "#9494AA" }}>No stock additions logged yet.</div>}
+          ) : <div style={{ fontSize: 13, color: "#9494AA" }}>No stock activity logged yet.</div>}
         </div>
       </div>
       <div className="bam-card" style={{ overflow: "hidden" }}>
@@ -1444,7 +1551,12 @@ function InventoryTab({ merch, onAddStock }) {
                   <td>{m.size}</td>
                   <td className={m.stock <= 3 ? "bam-lowstock" : ""}>{m.stock}{m.stock <= 3 && <span className="bam-badge" style={{ marginLeft: 6, background: "#FDEEF0", color: "var(--red)" }}>Low</span>}</td>
                   <td style={{ color: "var(--muted)", fontSize: 13 }}>{lr ? `${fmtDateTime(lr.created_at)} (+${lr.qty})` : "—"}</td>
-                  <td><button className="bam-btn bam-btn-secondary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => onAddStock(m)}><PackagePlus size={13} /> Add Stock</button></td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="bam-btn bam-btn-secondary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => onAddStock(m)}><PackagePlus size={13} /> Add Stock</button>
+                      <button className="bam-btn bam-btn-danger" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => onRemoveStock(m)}><Minus size={13} /> Remove Stock</button>
+                    </div>
+                  </td>
                 </tr>
               );
             }))}
@@ -1453,6 +1565,35 @@ function InventoryTab({ merch, onAddStock }) {
         </table>
       </div>
     </div>
+  );
+}
+
+function RemoveStockModal({ sku, onClose, onSave }) {
+  const [qty, setQty] = useState(1);
+  const [reason, setReason] = useState("damaged");
+  const [note, setNote] = useState("");
+  const submit = () => {
+    const n = Number(qty);
+    if (!n || n <= 0) { alert("Enter a quantity greater than 0."); return; }
+    onSave(n, reason, note.trim());
+  };
+  return (
+    <Modal title={`Remove Stock — ${sku.item} (${sku.size})`} onClose={onClose}>
+      <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 14 }}>Current stock: <strong>{sku.stock}</strong></div>
+      <label className="bam-label">Quantity to remove</label>
+      <input type="number" min="1" className="bam-input" style={{ marginBottom: 12 }} value={qty} onChange={(e) => setQty(e.target.value)} />
+      <label className="bam-label">Reason</label>
+      <select className="bam-input" style={{ marginBottom: 12 }} value={reason} onChange={(e) => setReason(e.target.value)}>
+        <option value="damaged">Damaged (returned by customer)</option>
+        <option value="lost">Lost / stolen</option>
+        <option value="correction">Stock count correction</option>
+        <option value="other">Other</option>
+      </select>
+      <label className="bam-label">Note (optional)</label>
+      <input className="bam-input" style={{ marginBottom: 16 }} placeholder="e.g. Torn jersey returned by parent" value={note} onChange={(e) => setNote(e.target.value)} />
+      <div style={{ fontSize: 12, color: "#9494AA", marginBottom: 12 }}>This item won't go back into sellable stock. Logged with today's date, time, and your username automatically.</div>
+      <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit}>Remove Stock</button>
+    </Modal>
   );
 }
 
@@ -1478,7 +1619,8 @@ function SalesTab({ players, merch, user, onSaleRecorded }) {
   const [date, setDate] = useState(todayStr());
   const [playerId, setPlayerId] = useState("");
   const [lines, setLines] = useState([]);
-  const [discount, setDiscount] = useState(0);
+  const [discountPct, setDiscountPct] = useState(0);
+  const [discountNote, setDiscountNote] = useState("");
   const [pickerKind, setPickerKind] = useState("single");
   const [pickerSkuId, setPickerSkuId] = useState("");
   const [pickerJerseyId, setPickerJerseyId] = useState("");
@@ -1515,12 +1657,13 @@ function SalesTab({ players, merch, user, onSaleRecorded }) {
   };
   const removeLine = (id) => setLines((ls) => ls.filter((l) => l.id !== id));
   const subtotal = lines.reduce((s, l) => s + l.unitPrice * l.qty, 0);
-  const total = Math.max(0, subtotal - (Number(discount) || 0));
+  const discountAmount = subtotal * ((Number(discountPct) || 0) / 100);
+  const total = Math.max(0, subtotal - discountAmount);
 
   const completeSale = async () => {
     if (!playerId) { alert("Select the player this sale is connected to."); return; }
     if (lines.length === 0) { alert("Add at least one item."); return; }
-    const { error: saleErr } = await supabase.from("sales").insert({ date, player_id: playerId, lines, discount: Number(discount) || 0, subtotal, total, created_by: user.id });
+    const { error: saleErr } = await supabase.from("sales").insert({ date, player_id: playerId, lines, discount: discountAmount, discount_pct: Number(discountPct) || 0, discount_note: discountNote.trim() || null, subtotal, total, created_by: user.id });
     if (saleErr) { alert(saleErr.message); return; }
     for (const line of lines) {
       const ids = line.kind === "kit" ? [line.jerseySkuId, line.shortSkuId] : [line.skuId];
@@ -1529,7 +1672,7 @@ function SalesTab({ players, merch, user, onSaleRecorded }) {
         if (m) await supabase.from("merchandise").update({ stock: m.stock - line.qty }).eq("id", skuId);
       }
     }
-    setLines([]); setDiscount(0); setPlayerId("");
+    setLines([]); setDiscountPct(0); setDiscountNote(""); setPlayerId("");
     await loadDay();
     await onSaleRecorded();
   };
@@ -1552,8 +1695,8 @@ function SalesTab({ players, merch, user, onSaleRecorded }) {
 
   const exportCSV = async () => {
     const { data } = await supabase.from("sales").select("*").gte("date", exportFrom).lte("date", exportTo).order("date");
-    const rows = [["Date", "Player", "Items", "Subtotal", "Discount", "Total"]];
-    (data || []).forEach((s) => rows.push([s.date, playerName(s.player_id), s.lines.map((l) => `${l.label} ×${l.qty}`).join("; "), s.subtotal, s.discount, s.total]));
+    const rows = [["Date", "Player", "Items", "Subtotal", "Discount %", "Discount Amount", "Discount Note", "Total"]];
+    (data || []).forEach((s) => rows.push([s.date, playerName(s.player_id), s.lines.map((l) => `${l.label} ×${l.qty}`).join("; "), s.subtotal, s.discount_pct || "", s.discount, s.discount_note || "", s.total]));
     downloadCSV(`sales_${exportFrom}_to_${exportTo}.csv`, rows);
   };
 
@@ -1612,12 +1755,20 @@ function SalesTab({ players, merch, user, onSaleRecorded }) {
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <div style={{ width: 260 }}>
+          <div style={{ width: 280 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}><span>Subtotal</span><span>{fmtMoney(subtotal)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 6 }}>
-              <span>Discount (₱)</span>
-              <input type="number" className="bam-input" style={{ width: 100, textAlign: "right" }} value={discount} onChange={(e) => setDiscount(e.target.value)} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 4 }}>
+              <span>Discount (%)</span>
+              <input type="number" min="0" max="100" className="bam-input" style={{ width: 100, textAlign: "right" }} value={discountPct} onChange={(e) => setDiscountPct(e.target.value)} />
             </div>
+            {Number(discountPct) > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+                <span>Discount amount</span><span>-{fmtMoney(discountAmount)}</span>
+              </div>
+            )}
+            {Number(discountPct) > 0 && (
+              <input className="bam-input" style={{ marginBottom: 10, fontSize: 12 }} placeholder="Reason for discount (optional)" value={discountNote} onChange={(e) => setDiscountNote(e.target.value)} />
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 16, borderTop: "1px solid var(--line)", paddingTop: 8, marginBottom: 12 }}><span>Total</span><span>{fmtMoney(total)}</span></div>
             <button className="bam-btn bam-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={completeSale}>Complete Sale</button>
           </div>
